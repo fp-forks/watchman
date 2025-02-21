@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
+
 
 import inspect
 import math
@@ -23,7 +25,6 @@ try:
 
     # Demandimport causes modules to be loaded lazily. Force the load now
     # so that we can fall back on pybser if bser doesn't exist
-    # pyre-ignore
     bser.pdu_info
 except ImportError:
     from . import pybser as bser

@@ -87,7 +87,7 @@ json_ref w_root_stop_watch_all() {
       root = it->second;
     }
 
-    root->cancel();
+    root->cancel("watch-del-all");
     if (!saveGlobalStateHook) {
       saveGlobalStateHook = root->getSaveGlobalStateHook();
     } else {
@@ -219,7 +219,7 @@ RootDebugStatus Root::getStatus() const {
       info.view_lock_wait_duration_milliseconds =
           ctx->viewLockWaitDuration.load().count();
       info.state = queryState;
-      info.client_pid = ctx->query->clientPid;
+      info.client_pid = ctx->query->clientInfo.clientPid;
       info.request_id = ctx->query->request_id;
       info.query = ctx->query->query_spec;
       if (ctx->query->subscriptionName) {
@@ -289,8 +289,8 @@ void w_root_free_watched_roots() {
 
   // ... and cancel them outside of the lock
   for (auto& root : roots) {
-    if (!root->cancel()) {
-      root->stopThreads();
+    if (!root->cancel("main thread exiting")) {
+      root->stopThreads("main thread exiting");
     }
   }
 
@@ -307,7 +307,7 @@ void w_root_free_watched_roots() {
     if (current == 0) {
       break;
     }
-    if (time(NULL) > started + 3) {
+    if (time(nullptr) > started + 3) {
       logf(ERR, "{} roots were still live at exit\n", current);
       break;
     }
