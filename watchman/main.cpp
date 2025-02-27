@@ -13,6 +13,7 @@
 #include <folly/String.h>
 #include <folly/init/Init.h>
 #include <folly/net/NetworkSocket.h>
+#include <folly/portability/Fcntl.h>
 #include <folly/system/Shell.h>
 
 #include <stdio.h>
@@ -138,18 +139,19 @@ std::optional<std::string> detect_starting_command(pid_t ppid) {
 #endif
 
   // redirect std{in,out,err}
-  int fd = ::open("/dev/null", O_RDONLY);
+  int fd = folly::fileops::open("/dev/null", O_RDONLY);
   if (fd != -1) {
     ignore_result(::dup2(fd, STDIN_FILENO));
-    ::close(fd);
+    folly::fileops::close(fd);
   }
 
   if (logging::log_name != "-") {
-    fd = open(logging::log_name.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0600);
+    fd = folly::fileops::open(
+        logging::log_name.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0600);
     if (fd != -1) {
       ignore_result(::dup2(fd, STDOUT_FILENO));
       ignore_result(::dup2(fd, STDERR_FILENO));
-      ::close(fd);
+      folly::fileops::close(fd);
     }
   }
 
@@ -194,7 +196,7 @@ std::optional<std::string> detect_starting_command(pid_t ppid) {
 
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &sigset, NULL);
+    sigprocmask(SIG_BLOCK, &sigset, nullptr);
   }
 #endif
 
@@ -259,7 +261,7 @@ static void close_random_fds() {
   }
 
   for (max_fd = open_max; max_fd > STDERR_FILENO; --max_fd) {
-    close(max_fd);
+    folly::fileops::close(max_fd);
   }
 #endif
 }
@@ -350,7 +352,7 @@ static SpawnResult run_service_as_daemon() {
 #ifdef _WIN32
 static SpawnResult spawn_win32(const std::vector<std::string>& daemon_argv) {
   char module_name[WATCHMAN_NAME_MAX];
-  GetModuleFileName(NULL, module_name, sizeof(module_name));
+  GetModuleFileName(nullptr, module_name, sizeof(module_name));
 
   ChildProcess::Options opts;
   opts.setFlags(POSIX_SPAWN_SETPGROUP);
