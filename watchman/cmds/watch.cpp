@@ -6,6 +6,7 @@
  */
 
 #include "watchman/Client.h"
+#include "watchman/ClientContext.h"
 #include "watchman/Command.h"
 #include "watchman/CommandRegistry.h"
 #include "watchman/Errors.h"
@@ -84,7 +85,8 @@ static UntypedResponse cmd_clock(Client* client, const json_ref& args) {
   auto root = resolveRoot(client, args);
 
   if (sync_timeout) {
-    root->syncToNow(std::chrono::milliseconds(sync_timeout));
+    root->syncToNow(
+        std::chrono::milliseconds(sync_timeout), client->getClientInfo());
   }
 
   UntypedResponse resp;
@@ -110,7 +112,7 @@ static UntypedResponse cmd_watch_delete(Client* client, const json_ref& args) {
 
   UntypedResponse resp;
   resp.set(
-      {{"watch-del", json_boolean(root->stopWatch())},
+      {{"watch-del", json_boolean(root->stopWatch("watch-del"))},
        {"root", w_string_to_json(root->root_path)}});
   return resp;
 }
@@ -128,7 +130,7 @@ W_CMD_REG(
     "watch-del-all",
     cmd_watch_del_all,
     CMD_DAEMON | CMD_POISON_IMMUNE,
-    NULL);
+    nullptr);
 
 /* watch-list
  * Returns a list of watched roots */
@@ -138,7 +140,11 @@ static UntypedResponse cmd_watch_list(Client*, const json_ref&) {
   resp.set("roots", std::move(root_paths));
   return resp;
 }
-W_CMD_REG("watch-list", cmd_watch_list, CMD_DAEMON | CMD_ALLOW_ANY_USER, NULL);
+W_CMD_REG(
+    "watch-list",
+    cmd_watch_list,
+    CMD_DAEMON | CMD_ALLOW_ANY_USER,
+    nullptr);
 
 // For each directory component in candidate_dir to the root of the filesystem,
 // look for root_file.  If root_file is present, update relpath to reflect the
