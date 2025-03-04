@@ -8,8 +8,10 @@
 #include "watchman/Client.h"
 
 #include <folly/MapUtil.h>
+#include <folly/stop_watch.h>
 
 #include "eden/common/utils/ProcessInfoCache.h"
+#include "watchman/ClientContext.h"
 #include "watchman/Command.h"
 #include "watchman/Errors.h"
 #include "watchman/Logging.h"
@@ -19,6 +21,8 @@
 #include "watchman/QueryableView.h"
 #include "watchman/Shutdown.h"
 #include "watchman/root/Root.h"
+#include "watchman/telemetry/LogEvent.h"
+#include "watchman/telemetry/WatchmanStructuredLogger.h"
 #include "watchman/watchman_cmd.h"
 
 namespace watchman {
@@ -49,7 +53,9 @@ Client::Client(std::unique_ptr<watchman_stream> stm)
 #else
           w_event_make_sockets()
 #endif
-      ) {
+              ),
+      peerPid_{this->stm->getPeerProcessID()},
+      peerInfo_{lookupProcessInfo(peerPid_)} {
   logf(DBG, "accepted client:stm={}\n", fmt::ptr(this->stm.get()));
 }
 
@@ -75,6 +81,10 @@ void Client::enqueueResponse(UntypedResponse resp) {
 void Client::sendErrorResponse(std::string_view formatted) {
   UntypedResponse resp;
   resp.set("error", typed_string_to_json(formatted));
+
+  if (dispatch_command) {
+    dispatch_command->error = formatted;
+  }
 
   if (perf_sample) {
     perf_sample->add_meta("error", typed_string_to_json(formatted));
@@ -129,10 +139,16 @@ bool Client::dispatchCommand(const Command& command, CommandFlags mode) {
     // Scope for the perf sample
     {
       logf(DBG, "dispatch_command: {}\n", def->name);
+      DispatchCommand dispatchCommand;
+      dispatchCommand.command = command.name();
+      dispatch_command = &dispatchCommand;
+
       auto sample_name = "dispatch_command:" + std::string{def->name};
       PerfSample sample(sample_name.c_str());
       perf_sample = &sample;
+
       SCOPE_EXIT {
+        dispatch_command = nullptr;
         perf_sample = nullptr;
       };
 
@@ -143,21 +159,38 @@ bool Client::dispatchCommand(const Command& command, CommandFlags mode) {
       // Let's change `func` to take a Command after Command knows what a root
       // path is.
       auto rendered = command.render();
+      auto renderedString = rendered.toString();
 
       try {
         enqueueResponse(def->handler(this, rendered));
       } catch (const ErrorResponse& e) {
         sendErrorResponse(e.what());
+        dispatchCommand.error = e.what();
       } catch (const ResponseWasHandledManually&) {
       }
 
       if (sample.finish()) {
         sample.add_meta("args", std::move(rendered));
         sample.add_meta(
-            "client",
-            json_object({{"pid", json_integer(stm->getPeerProcessID())}}));
+            "client", json_object({{"pid", json_integer(peerPid_)}}));
         sample.log();
       }
+
+      const auto& [samplingRate, eventCount] =
+          getLogEventCounters(LogEventType::DispatchCommandType);
+      // Log if override set, or if we have hit the sample rate
+      if (sample.will_log || eventCount == samplingRate) {
+        dispatchCommand.event_count =
+            eventCount != samplingRate ? 0 : eventCount;
+        dispatchCommand.args = renderedString;
+        dispatchCommand.client_pid = peerPid_;
+        dispatchCommand.client_name =
+            facebook::eden::ProcessInfoCache::cleanProcessCommandline(
+                std::move(peerInfo_.get().name));
+
+        getLogger()->logEvent(dispatchCommand);
+      }
+
       logf(DBG, "dispatch_command: {} (completed)\n", def->name);
     }
 
@@ -166,6 +199,10 @@ bool Client::dispatchCommand(const Command& command, CommandFlags mode) {
     sendErrorResponse(folly::exceptionStr(e));
     return false;
   }
+}
+
+ClientContext Client::getClientInfo() const {
+  return ClientContext{peerPid_, peerInfo_};
 }
 
 std::string ClientStatus::getName() const {
@@ -211,10 +248,7 @@ void UserClient::create(std::unique_ptr<watchman_stream> stm) {
 }
 
 UserClient::UserClient(PrivateBadge, std::unique_ptr<watchman_stream> stm)
-    : Client{std::move(stm)},
-      since_{std::chrono::system_clock::now()},
-      peerPid_{this->stm->getPeerProcessID()},
-      peerInfo_{lookupProcessInfo(peerPid_)} {
+    : Client{std::move(stm)}, since_{std::chrono::system_clock::now()} {
   clients.wlock()->insert(this);
 }
 
@@ -255,7 +289,7 @@ ClientDebugStatus UserClient::getDebugStatus() const {
     rv.peer.emplace();
     rv.peer->pid = peerPid_;
     // May briefly, once, block on the ProcessInfoCache thread.
-    rv.peer->name = peerInfo_.get().name;
+    rv.peer->name = std::move(peerInfo_.get().name);
   }
   rv.since = std::chrono::system_clock::to_time_t(since_);
   return rv;
@@ -294,12 +328,7 @@ void UserClient::clientThread() noexcept {
 
   stm->setNonBlock(true);
   w_set_thread_name(
-      "client=",
-      unique_id,
-      ":stm=",
-      uintptr_t(stm.get()),
-      ":pid=",
-      stm->getPeerProcessID());
+      "client=", unique_id, ":stm=", uintptr_t(stm.get()), ":pid=", peerPid_);
 
   client_is_owner = stm->peerIsOwner();
 
@@ -477,7 +506,7 @@ disconnected:
       ":stm=",
       uintptr_t(stm.get()),
       ":pid=",
-      stm->getPeerProcessID());
+      peerPid_);
 }
 
 } // namespace watchman
